@@ -243,3 +243,17 @@ export function buildBrowserBindings(
 
   return applyBindingRemaps(bindings, options.bindingRemaps ?? readBindingRemaps());
 }
+
+/**
+ * Whether a new pane starts with the URL bar shown. `AWRIT_URL_BAR=1` or `=0` in the
+ * environment wins over the config's `urlBar.defaultVisible`, so a launcher can choose
+ * without editing the config.
+ */
+export function urlBarShownByDefault(
+  config: { urlBar?: { defaultVisible?: boolean } },
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  if (env.AWRIT_URL_BAR === '1') return true;
+  if (env.AWRIT_URL_BAR === '0') return false;
+  return Boolean(config.urlBar?.defaultVisible);
+}

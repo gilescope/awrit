@@ -1,3 +1,4 @@
+import { urlBarShownByDefault } from '../browserBindings';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import type { AdbServerInstance, createAdbControl } from '../adb/adbControl';
@@ -111,7 +112,7 @@ export function createPaneSession(deps: PaneSessionDeps) {
         session,
         assetDirectory,
         terminal,
-        urlBarVisible: getConfig().urlBar?.defaultVisible,
+        urlBarVisible: urlBarShownByDefault(getConfig()),
         adbMode: Boolean(stream),
         adbSerial,
         adbServerUrl: stream?.url,
