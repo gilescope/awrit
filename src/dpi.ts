@@ -2,6 +2,18 @@ import path from 'node:path';
 import { readFileSync } from 'node:fs';
 
 /**
+ * A display scale forced by the user: `AWRIT_DISPLAY_SCALE=1` for a terminal that reports its
+ * window in physical pixels on a Retina/HiDPI display, where awrit's page renders 1:1 with those
+ * pixels but mouse positions would otherwise be divided by the display's scale factor.
+ */
+export function scaleOverride(
+  env: Record<string, string | undefined> = process.env,
+): number | undefined {
+  const scale = Number.parseFloat(env.AWRIT_DISPLAY_SCALE ?? '');
+  return scale > 0 ? scale : undefined;
+}
+
+/**
  * For now just detects the Wayland virtual display scale in kitty, because
  * kitty actually respects that while Chrome and Ghostty do not
  */
