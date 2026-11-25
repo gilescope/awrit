@@ -9,12 +9,16 @@ import {
   shell,
   clipboard,
   dialog,
+  type NativeImage,
 } from 'electron';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { generateErrorPage, generateCrashPage, shouldIgnoreError } from './errorPage';
 import { calculateLayout, layout, px, row, type LayoutContainer, type LayoutNode } from './layout';
+import { popupRect, requestedPopupSize } from './popup';
+import { withPopup } from './popupCompose';
+import { debuggerManager } from './browserOwner/debugger';
 import {
   coverPixel,
   getWindowSize,
@@ -125,6 +129,13 @@ export type WindowView = {
   toolbarLayoutContainer: LayoutContainer;
   toolbarNode: LayoutNode;
   contentNode: LayoutNode;
+  /** A page's `window.open` popup, drawn over the page; it takes the keyboard and mouse while open. */
+  popup?: {
+    window: BrowserWindow;
+    node: LayoutNode;
+    /** The popup's latest frame (BGRA), at its place in the page frame. */
+    frame?: { bitmap: Buffer; width: number; height: number };
+  };
   omniboxVisible: boolean;
   findVisible: boolean;
   designMode: boolean;
@@ -674,6 +685,7 @@ export async function createWindowWithToolbar(
           terminal,
           isActive,
           true,
+          (image) => withPopup(image, view.popup),
         );
         destructors.push(tRef.destroy, cRef.destroy);
         refreshers.push(tRef.refresh, cRef.refresh);
@@ -777,44 +789,38 @@ export async function createWindowWithToolbar(
           return { action: 'deny' as const };
         }
         console_.log('[Navigation] Popup requested:', url);
-        // Parse requested popup dimensions from window.open features string, e.g. "width=500,height=600"
-        const featureMap = new Map(
-          (typeof features === 'string' ? features : '').split(',').map((f) => {
-            const [k, v] = f.split('=');
-            return [k.trim(), v?.trim()];
-          }),
-        );
-        const requestedWidth = parseInt(featureMap.get('width') || '', 10);
-        const requestedHeight = parseInt(featureMap.get('height') || '', 10);
         const [contentW, contentH] = content.getContentSize();
-        // Use requested size if available and positive, otherwise fall back to full content size
-        const w =
-          Number.isFinite(requestedWidth) && requestedWidth > 0
-            ? Math.min(requestedWidth, contentW)
-            : contentW;
-        const h =
-          Number.isFinite(requestedHeight) && requestedHeight > 0
-            ? Math.min(requestedHeight, contentH)
-            : contentH;
-        console_.log(
-          `[Popup] Creating popup with dimensions ${w}x${h} (requested: ${requestedWidth || 'none'}x${requestedHeight || 'none'}, content: ${contentW}x${contentH})`,
-        );
+        const size = requestedPopupSize(typeof features === 'string' ? features : '', {
+          width: contentW,
+          height: contentH,
+        });
+        console_.log(`[Popup] Drawing ${size.width}x${size.height} popup over the page`);
 
-        // Use native Electron window handling!
-        // By returning action: 'allow' and explicitly disabling offscreen,
-        // Chromium will natively link window.opener and handle trusted MessageEvents,
-        // perfectly supporting Google Identity Services.
+        // Chromium links window.opener (what Google Identity Services needs) only for a
+        // real window, and a window opened by window.open cannot be made off-screen after
+        // the fact: so it is a normal one, parked far off any display, with its frames
+        // captured and drawn over the page by the terminal. See 'did-create-window'.
         return {
           action: 'allow' as const,
           overrideBrowserWindowOptions: {
-            show: true,
-            width: w,
-            height: h,
+            // Shown inactive once made invisible: show() would activate this app and take
+            // the keyboard and mouse from the terminal.
+            show: false,
+            opacity: 0,
+            x: -30000,
+            y: -30000,
+            width: size.width,
+            height: size.height,
+            frame: false,
+            focusable: false,
+            skipTaskbar: true,
+            hasShadow: false,
             webPreferences: {
-              offscreen: false, // Must be false so the native window paints correctly
               sandbox: true,
               contextIsolation: true,
               nodeIntegration: false,
+              zoomFactor: 1,
+              backgroundThrottling: false,
             },
           },
         };
@@ -826,6 +832,84 @@ export async function createWindowWithToolbar(
 
     toolbar.webContents.setWindowOpenHandler(handleNewWindow);
     content.webContents.setWindowOpenHandler(handleNewWindow);
+
+    // A popup is drawn into the page's own frame, centred, until it closes: the terminal
+    // still shows one image (two overlapping images were shown striped).
+    content.webContents.on('did-create-window', (popup) => {
+      view.popup?.window.close(); // one at a time
+      const [width, height] = popup.getContentSize();
+      const dpr = layoutContainer.devicePixelRatio;
+      const node = row({ width: px(width), height: px(height), tag: 'popup' });
+      node.deviceLayout = popupRect(
+        { width: contentNode.deviceLayout.width, height: contentNode.deviceLayout.height },
+        { width, height },
+        dpr,
+      );
+      node.computedLayout = {
+        x: Math.floor(node.deviceLayout.x / dpr),
+        y: Math.floor(node.deviceLayout.y / dpr),
+        width,
+        height,
+      };
+      const state: NonNullable<WindowView['popup']> = { window: popup, node };
+      view.popup = state;
+      // macOS keeps a window on a display, so it cannot be parked off-screen: make it invisible.
+      popup.setOpacity(0);
+      popup.setIgnoreMouseEvents(true);
+      popup.showInactive();
+      // It is never focused (that would take focus from the terminal), so its page is told it
+      // has focus: carets show and typed keys reach the focused field. Held until it closes.
+      let focusLease: ReturnType<typeof debuggerManager.acquire> | undefined;
+      try {
+        focusLease = debuggerManager.acquire(popup.webContents);
+        focusLease
+          .sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true })
+          .catch(() => {});
+      } catch {
+        // Without it the popup still shows and takes clicks.
+      }
+      // The compositor sends a frame per vsync even for a static popup: handle at most ~15 a
+      // second, always the latest, so the last frame after a change is never dropped.
+      let latest: NativeImage | undefined;
+      let frameTimer: ReturnType<typeof setTimeout> | undefined;
+      let lastFrameAt = 0;
+      const handleFrame = () => {
+        frameTimer = undefined;
+        const image = latest;
+        latest = undefined;
+        if (!image || popup.isDestroyed()) return;
+        lastFrameAt = Date.now();
+        // The native window draws at the display's scale; the page frame is at the layout's.
+        const want = node.deviceLayout;
+        const size = image.getSize();
+        const scaled =
+          size.width === want.width && size.height === want.height
+            ? image
+            : image.resize({ width: want.width, height: want.height });
+        const bitmap = scaled.toBitmap();
+        // Ignore a frame identical to the last: repainting the page for it is wasted work.
+        if (state.frame && Buffer.compare(state.frame.bitmap, bitmap) === 0) return;
+        state.frame = { bitmap, ...scaled.getSize() };
+        // The page paints only on change; make it paint so this frame is blended in.
+        if (!content.isDestroyed()) content.webContents.invalidate();
+      };
+      popup.webContents.beginFrameSubscription(false, (image) => {
+        latest = image;
+        if (frameTimer) return;
+        frameTimer = setTimeout(handleFrame, Math.max(0, 66 - (Date.now() - lastFrameAt)));
+      });
+      popup.once('closed', () => {
+        if (frameTimer) clearTimeout(frameTimer);
+        try {
+          focusLease?.release();
+        } catch {
+          // Already detached with the closed window.
+        }
+        if (view.popup === state) view.popup = undefined;
+        view.focusedContent = content.webContents;
+        if (!content.isDestroyed()) content.webContents.invalidate();
+      });
+    });
 
     content.webContents.on('will-navigate', (_event, url) => {
       const displayUrl = url.length > 100 ? `${url.substring(0, 100)}...` : url;
@@ -866,6 +950,7 @@ export async function createWindowWithToolbar(
 
     content.webContents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
       if (isMainFrame && !isInPlace) {
+        view.popup?.window.close(); // the page it belonged to is gone
         const displayUrl = url.length > 100 ? `${url.substring(0, 100)}...` : url;
         console_.log(
           `[Navigation] Main frame hard navigation to: ${displayUrl}, ensuring display freeze...`,

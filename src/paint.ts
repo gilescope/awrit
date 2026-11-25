@@ -373,6 +373,8 @@ export function registerPaintedContentFallback(
   terminal?: TerminalContext,
   isActive: () => boolean = () => true,
   cacheThumbnail = false,
+  /** Adjusts each frame before it is sent (a popup drawn over the page). */
+  compose?: (image: NativeImage) => NativeImage,
 ): PaintedContent {
   const { setModes, startBatch, endBatch } = terminal?.output ?? defaultOutput;
   const paintImageForTerminal = terminal?.graphics.paintImage ?? paintImage;
@@ -408,7 +410,7 @@ export function registerPaintedContentFallback(
     },
   };
 
-  async function paint(_: any, dirty: Rectangle, image: NativeImage) {
+  async function paint(_: any, dirty: Rectangle, frame: NativeImage) {
     if (
       !isActive() ||
       destroyed ||
@@ -417,8 +419,9 @@ export function registerPaintedContentFallback(
     )
       return;
 
-    const imageSize = image.getSize();
+    const imageSize = frame.getSize();
     if (imageSize.width === 0 || imageSize.height === 0) return;
+    const image = compose ? compose(frame) : frame;
 
     if ((w as any).isSuppressingPaint) {
       (w as any).paintCount = ((w as any).paintCount || 0) + 1;

@@ -245,12 +245,16 @@ export function createInputHandler(
           return true;
         }
 
-        const webContents = isToolbarActive ? view.toolbar.webContents : view.focusedContent;
+        const webContents = isToolbarActive
+          ? view.toolbar.webContents
+          : (view.popup?.window.webContents ?? view.focusedContent);
 
         ensureInputUnlocked(webContents);
 
         // OPTIMIZED FOCUS: Only focus if not already focused
-        if (view.focusedContent !== webContents) {
+        // A popup is a real (invisible) window: focusing it would activate this app and take
+        // the keyboard and mouse from the terminal. Its page has emulated focus instead.
+        if (view.focusedContent !== webContents && webContents !== view.popup?.window.webContents) {
           webContents.focus();
           view.focusedContent = webContents;
         }
@@ -296,7 +300,9 @@ export function createInputHandler(
 
       case 'paste': {
         if (evt.paste) {
-          const webContents = isToolbarActive ? view.toolbar.webContents : view.content.webContents;
+          const webContents = isToolbarActive
+            ? view.toolbar.webContents
+            : (view.popup?.window.webContents ?? view.content.webContents);
           const { clipboard } = require('electron');
           clipboard.writeText(evt.paste);
           webContents.paste();
@@ -346,16 +352,16 @@ export function createInputHandler(
         const { toolbarNode, contentNode, layoutContainer } = view;
         const dpr = layoutContainer.devicePixelRatio;
 
-        const targetWindow = isToolbarActive ? view.toolbar : view.content;
+        const targetWindow = isToolbarActive ? view.toolbar : (view.popup?.window ?? view.content);
         const targetContents = targetWindow.webContents;
 
-        // OPTIMIZED FOCUS: Only focus if not already focused
-        if (view.focusedContent !== targetContents) {
+        // OPTIMIZED FOCUS: Only focus if not already focused. Never a popup: see the key path.
+        if (view.focusedContent !== targetContents && targetWindow !== view.popup?.window) {
           targetContents.focus();
           view.focusedContent = targetContents;
         }
 
-        const targetNode = isToolbarActive ? toolbarNode : contentNode;
+        const targetNode = isToolbarActive ? toolbarNode : (view.popup?.node ?? contentNode);
         const adjustedX = Math.floor((rawX - targetNode.deviceLayout.x) / dpr);
         const adjustedY = Math.floor((rawY - targetNode.deviceLayout.y) / dpr);
 
