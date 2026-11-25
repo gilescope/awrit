@@ -1,3 +1,5 @@
+import { urlBarShownByDefault } from '../browserBindings';
+import { topBarHeight } from '../topBar';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import type { AdbServerInstance, createAdbControl } from '../adb/adbControl';
@@ -31,7 +33,7 @@ export interface PaneOutput {
 export interface PaneConfig {
   homepage: string;
   profile?: string | null;
-  urlBar?: { defaultVisible?: boolean };
+  urlBar?: { defaultVisible?: boolean; position?: string };
   kitty?: { quitOnCtrlC?: boolean };
 }
 
@@ -111,7 +113,8 @@ export function createPaneSession(deps: PaneSessionDeps) {
         session,
         assetDirectory,
         terminal,
-        urlBarVisible: getConfig().urlBar?.defaultVisible,
+        urlBarVisible: urlBarShownByDefault(getConfig()),
+        topBar: topBarHeight(getConfig()),
         adbMode: Boolean(stream),
         adbSerial,
         adbServerUrl: stream?.url,

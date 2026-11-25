@@ -1,4 +1,5 @@
 import { frameTrace } from './frameTrace';
+import { WHITE_HOLD_MS, WHITE_PAGE, holdWhiteFrame } from './whiteHold';
 import { ShmGraphicBuffer, getWindowSize as rawGetWindowSize } from 'awrit-native-rs';
 import { rememberTabThumbnail } from './tabThumbnail';
 import type { BrowserWindow, NativeImage, Rectangle } from 'electron';
@@ -373,6 +374,8 @@ export function registerPaintedContentFallback(
   terminal?: TerminalContext,
   isActive: () => boolean = () => true,
   cacheThumbnail = false,
+  /** Adjusts each frame before it is sent (a popup drawn over the page). */
+  compose?: (image: NativeImage) => NativeImage,
 ): PaintedContent {
   const { setModes, startBatch, endBatch } = terminal?.output ?? defaultOutput;
   const paintImageForTerminal = terminal?.graphics.paintImage ?? paintImage;
@@ -380,6 +383,8 @@ export function registerPaintedContentFallback(
   let paintedImage: PaintedImage | undefined;
   let reuseBuffer = false;
   let destroyed = false;
+  let whiteSince: number | undefined;
+  let whiteTimer: ReturnType<typeof setTimeout> | undefined;
   const previous = weakPaintedContents_.get(w)?.snapshot?.();
   let lastBitmap = previous?.bitmap;
   let lastImageSize = previous?.size;
@@ -401,6 +406,7 @@ export function registerPaintedContentFallback(
     },
     destroy() {
       destroyed = true;
+      if (whiteTimer) clearTimeout(whiteTimer);
       contents.off('paint', paint);
       result.buffer = undefined;
       paintedImage?.free();
@@ -408,7 +414,7 @@ export function registerPaintedContentFallback(
     },
   };
 
-  async function paint(_: any, dirty: Rectangle, image: NativeImage) {
+  async function paint(_: any, dirty: Rectangle, frame: NativeImage) {
     if (
       !isActive() ||
       destroyed ||
@@ -417,8 +423,9 @@ export function registerPaintedContentFallback(
     )
       return;
 
-    const imageSize = image.getSize();
+    const imageSize = frame.getSize();
     if (imageSize.width === 0 || imageSize.height === 0) return;
+    const image = compose ? compose(frame) : frame;
 
     if ((w as any).isSuppressingPaint) {
       (w as any).paintCount = ((w as any).paintCount || 0) + 1;
@@ -480,13 +487,24 @@ export function registerPaintedContentFallback(
     if (replace && paintedImage) {
       const bitmap = image.toBitmap();
 
-      // Flash Killer for Fallback mode
-      if ((w as any).paintCount < 60) {
-        if (isMostlyWhite(bitmap, imageSize.width, imageSize.height)) {
+      // Flash Killer for Fallback mode. Limited in time: see whiteHold.ts.
+      if ((w as any).paintCount < 60 && isMostlyWhite(bitmap, imageSize.width, imageSize.height)) {
+        const heldMs = whiteSince === undefined ? 0 : Date.now() - whiteSince;
+        if (holdWhiteFrame((w as any).paintCount, heldMs)) {
           (w as any).paintCount++;
+          whiteSince ??= Date.now();
+          // A static page sends no further frame: ask for one when the hold runs out.
+          whiteTimer ??= setTimeout(() => {
+            whiteTimer = undefined;
+            if (!destroyed && !contents.isDestroyed()) contents.invalidate();
+          }, WHITE_HOLD_MS + 20);
           return;
         }
+        // The hold ran out: this page is simply white. Stop holding its frames until the
+        // next navigation resets the count.
+        (w as any).paintCount = WHITE_PAGE;
       }
+      whiteSince = undefined;
 
       lastBitmap = bitmap;
       startBatch();

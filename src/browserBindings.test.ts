@@ -130,3 +130,13 @@ test('buildBrowserBindings dispatches to view methods and fallback injections', 
   newWindowAction({ isMac: false, view: mockView });
   expect(viewNewWindowCalled).toBe(true);
 });
+
+test('AWRIT_URL_BAR decides whether the URL bar starts shown, over urlBar.defaultVisible', async () => {
+  const { urlBarShownByDefault } = await import('./browserBindings');
+  expect(urlBarShownByDefault({}, {})).toBe(false);
+  expect(urlBarShownByDefault({ urlBar: { defaultVisible: true } }, {})).toBe(true);
+  expect(urlBarShownByDefault({ urlBar: { defaultVisible: false } }, { AWRIT_URL_BAR: '1' })).toBe(true);
+  expect(urlBarShownByDefault({ urlBar: { defaultVisible: true } }, { AWRIT_URL_BAR: '0' })).toBe(false);
+  // Anything but 0 or 1 leaves the config's choice alone.
+  expect(urlBarShownByDefault({ urlBar: { defaultVisible: true } }, { AWRIT_URL_BAR: 'yes' })).toBe(true);
+});

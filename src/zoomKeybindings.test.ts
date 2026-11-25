@@ -43,3 +43,37 @@ for (const [action, initial, expected] of [
     expect(sent).toEqual([['content:zoom-changed', zoom]]);
   });
 }
+
+import { startsBinding } from './keybindings';
+
+// Chords a terminal reports for the shifted zoom keys, and the binding that must answer each.
+// Plain Cmd/Ctrl + = and - are not here: the terminal keeps those for its own font size.
+for (const [code, modifiers, binding] of [
+  ['+', ['meta', 'shift'], '<M-S-plus>'],
+  ['=', ['meta', 'shift'], '<M-S-=>'],
+  ['-', ['meta', 'shift'], '<M-S-minus>'],
+  ['_', ['meta', 'shift'], '<M-S-_>'],
+  ['+', ['ctrl', 'shift'], '<C-S-plus>'],
+  ['=', ['ctrl', 'shift'], '<C-S-=>'],
+  ['-', ['ctrl', 'shift'], '<C-S-minus>'],
+  ['_', ['ctrl', 'shift'], '<C-S-_>'],
+] as const) {
+  test(`${modifiers.join('+')}+${code} is named ${binding}`, () => {
+    expect(startsBinding({ code, modifiers: [...modifiers] } as never, binding)).toBe(true);
+  });
+}
+
+test('config.js binds the shifted zoom chords in both keymaps', () => {
+  for (const binding of [
+    '<M-S-plus>',
+    '<M-S-=>',
+    '<M-S-minus>',
+    '<M-S-_>',
+    '<C-S-plus>',
+    '<C-S-=>',
+    '<C-S-minus>',
+    '<C-S-_>',
+  ]) {
+    expect(source.split(`'${binding}'`).length - 1).toBe(2);
+  }
+});

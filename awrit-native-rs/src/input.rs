@@ -96,7 +96,8 @@ impl From<Event> for TermEvent {
         if mods.contains(KeyModifiers::SHIFT) {
           mod_vec.push("shift".to_string());
         }
-        if mods.contains(KeyModifiers::META) {
+        // Cmd arrives as Super under the Kitty keyboard protocol; the bindings call it meta.
+        if mods.contains(KeyModifiers::META) || mods.contains(KeyModifiers::SUPER) {
           mod_vec.push("meta".to_string());
         }
         if mods.contains(KeyModifiers::CAPS_LOCK) {
@@ -400,4 +401,32 @@ pub fn listen_for_input<'a>(
     QUIT.store(true, Ordering::SeqCst);
     Ok(())
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crossterm::event::KeyEvent as CtKeyEvent;
+
+  fn modifiers_of(event: Event) -> Vec<String> {
+    TermEvent::from(event).key_event.expect("a key event").modifiers
+  }
+
+  // Kitty keyboard protocol reports Cmd as Super; awrit's mac bindings call it `meta`.
+  #[test]
+  fn cmd_shift_equals_reports_meta_and_shift() {
+    let event = Event::Key(CtKeyEvent::new(
+      KeyCode::Char('='),
+      KeyModifiers::SUPER | KeyModifiers::SHIFT,
+    ));
+    let mods = modifiers_of(event);
+    assert!(mods.contains(&"meta".to_string()), "got {mods:?}");
+    assert!(mods.contains(&"shift".to_string()), "got {mods:?}");
+  }
+
+  #[test]
+  fn a_key_without_cmd_reports_no_meta() {
+    let event = Event::Key(CtKeyEvent::new(KeyCode::Char('='), KeyModifiers::SHIFT));
+    assert!(!modifiers_of(event).contains(&"meta".to_string()));
+  }
 }

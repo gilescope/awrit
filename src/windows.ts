@@ -9,13 +9,22 @@ import {
   shell,
   clipboard,
   dialog,
+  type NativeImage,
 } from 'electron';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { generateErrorPage, generateCrashPage, shouldIgnoreError } from './errorPage';
 import { calculateLayout, layout, px, row, type LayoutContainer, type LayoutNode } from './layout';
-import { coverPixel, getWindowSize, registerPaintedContent, registerPaintedContentFallback } from './paint';
+import { popupRect, requestedPopupSize } from './popup';
+import { withPopup } from './popupCompose';
+import { debuggerManager } from './browserOwner/debugger';
+import {
+  coverPixel,
+  getWindowSize,
+  registerPaintedContent,
+  registerPaintedContentFallback,
+} from './paint';
 import { sessionPromise } from './session';
 import { extensionsPromise, installedExtensionsPromise } from './extensions';
 import { clearPlacements, paintInitialFrame } from './tty/kittyGraphics';
@@ -43,7 +52,7 @@ import { registerDesignIpc } from './design/windowDesignIpc';
 import { getAppDataPath } from './paths';
 import { initSessionWorkspace } from './session/workspace';
 import { readCodeSource, readCodeSnapshot } from './design/codeSource';
-import { getDisplayScale } from './dpi';
+import { getDisplayScale, scaleOverride } from './dpi';
 import { features } from './features';
 import { createCursorUpdater } from './tty/cursor';
 
@@ -120,6 +129,17 @@ export type WindowView = {
   toolbarLayoutContainer: LayoutContainer;
   toolbarNode: LayoutNode;
   contentNode: LayoutNode;
+  /** Height of the top bar strip in layout pixels; 0 or absent when there is none. */
+  topBarHeight?: number;
+  /** The strip's place in the layout, above the page. */
+  barNode?: LayoutNode;
+  /** A page's `window.open` popup, drawn over the page; it takes the keyboard and mouse while open. */
+  popup?: {
+    window: BrowserWindow;
+    node: LayoutNode;
+    /** The popup's latest frame (BGRA), at its place in the page frame. */
+    frame?: { bitmap: Buffer; width: number; height: number };
+  };
   omniboxVisible: boolean;
   findVisible: boolean;
   designMode: boolean;
@@ -203,6 +223,8 @@ export async function createWindowWithToolbar(
   initialUrl = 'https://github.com/chase/awrit',
   windowOptions: {
     urlBarVisible?: boolean;
+    /** Height of a top bar strip (back, forward, reload, address); 0 or absent for none. */
+    topBar?: number;
     adbMode?: boolean;
     adbSerial?: string;
     onResize?: (size: WindowDimensions) => void;
@@ -239,26 +261,33 @@ export async function createWindowWithToolbar(
     const layoutContainer = layout(
       size.width,
       size.height,
-      getDisplayScale() ?? screen.getPrimaryDisplay().scaleFactor,
+      scaleOverride() ?? getDisplayScale() ?? screen.getPrimaryDisplay().scaleFactor,
     );
 
     const toolbarLayoutContainer = layout(
       size.width,
       size.height,
-      getDisplayScale() ?? screen.getPrimaryDisplay().scaleFactor,
+      scaleOverride() ?? getDisplayScale() ?? screen.getPrimaryDisplay().scaleFactor,
     );
 
     const omniboxVisible = windowOptions.urlBarVisible ?? false;
     let toolbarLoaded = false;
 
     const toolbarNode = row({ width: px(size.width), height: px(size.height), tag: 'omnibox' });
-    const contentNode = row({ width: px(size.width), height: px(size.height), tag: 'content' });
+    // A device mirror has its own controls; everything else may have the top bar.
+    const barHeight = windowOptions.adbMode ? 0 : (windowOptions.topBar ?? 0);
+    const barNode = row({ width: px(size.width), height: px(barHeight), tag: 'bar' });
+    const contentNode = row({
+      width: px(size.width),
+      height: px(size.height - barHeight),
+      tag: 'content',
+    });
 
     const terminalFeatures = terminal?.features ?? features.current;
     const hasAnimation =
       !windowOptions.adbMode && terminalFeatures?.loadFrame && terminalFeatures.compositeFrame;
 
-    calculateLayout(layoutContainer, [contentNode]);
+    calculateLayout(layoutContainer, barHeight ? [barNode, contentNode] : [contentNode]);
     calculateLayout(toolbarLayoutContainer, [toolbarNode]);
 
     let destroyed = false;
@@ -300,7 +329,10 @@ export async function createWindowWithToolbar(
       ...contentNode.computedLayout,
       ...(transparent || terminalReview
         ? { transparent: true, backgroundColor: '#00000000' }
-        : { transparent: false, backgroundColor: terminal?.identity.terminalBackground ?? '#000000' }),
+        : {
+            transparent: false,
+            backgroundColor: terminal?.identity.terminalBackground ?? '#000000',
+          }),
       webPreferences: {
         zoomFactor: 1,
         session: windowOptions.session ?? (await sessionPromise),
@@ -332,27 +364,37 @@ export async function createWindowWithToolbar(
     // Linux only: Chromium's chooser crashes on Wayland and shows nothing on X11 for offscreen pages.
     // A remote pane intercepts everywhere so the page learns no host dialog can open.
     const stopContentFileChooser = windowOptions.onFileChooser
-      ? setupFileChooser(content.webContents, windowOptions.onFileChooser, () => {
-          windowOptions.onFileChooserUnsupported?.();
-          content.close();
-        }, true)
+      ? setupFileChooser(
+          content.webContents,
+          windowOptions.onFileChooser,
+          () => {
+            windowOptions.onFileChooserUnsupported?.();
+            content.close();
+          },
+          true,
+        )
       : windowOptions.onFileChooserUnsupported
-      ? setupFileChooser(content.webContents, () => {
-          windowOptions.onFileChooserUnsupported?.();
-          return Promise.resolve({ canceled: true, filePaths: [] });
-        }, () => {
-          windowOptions.onFileChooserUnsupported?.();
-          // Fail closed: never leave a remote page able to open a native host dialog.
-          content.close();
-        })
-      : process.platform === 'linux'
-        ? setupFileChooser(content.webContents, options => dialog.showOpenDialog(options))
-        : () => {};
+        ? setupFileChooser(
+            content.webContents,
+            () => {
+              windowOptions.onFileChooserUnsupported?.();
+              return Promise.resolve({ canceled: true, filePaths: [] });
+            },
+            () => {
+              windowOptions.onFileChooserUnsupported?.();
+              // Fail closed: never leave a remote page able to open a native host dialog.
+              content.close();
+            },
+          )
+        : process.platform === 'linux'
+          ? setupFileChooser(content.webContents, (options) => dialog.showOpenDialog(options))
+          : () => {};
     onFailure(stopContentFileChooser);
     // Same Linux-only need as file inputs; remote panes stay unable to open a host dialog.
-    const stopFolderPicker = process.platform === 'linux' && !windowOptions.onFileChooserUnsupported
-      ? setupFolderPicker(content.webContents, options => dialog.showOpenDialog(options))
-      : () => {};
+    const stopFolderPicker =
+      process.platform === 'linux' && !windowOptions.onFileChooserUnsupported
+        ? setupFolderPicker(content.webContents, (options) => dialog.showOpenDialog(options))
+        : () => {};
     onFailure(stopFolderPicker);
 
     const destructors: Array<() => void> = [];
@@ -594,13 +636,26 @@ export async function createWindowWithToolbar(
         // Kitty canvas dimensions are device pixels. Chromium paints at the
         // layout's device scale, which can exceed the terminal's logical size.
         size = {
-          width: Math.max(size.width, contentNode.deviceLayout.x + contentNode.deviceLayout.width, toolbarNode.deviceLayout.x + toolbarNode.deviceLayout.width),
-          height: Math.max(size.height, contentNode.deviceLayout.y + contentNode.deviceLayout.height, toolbarNode.deviceLayout.y + toolbarNode.deviceLayout.height),
+          width: Math.max(
+            size.width,
+            contentNode.deviceLayout.x + contentNode.deviceLayout.width,
+            toolbarNode.deviceLayout.x + toolbarNode.deviceLayout.width,
+          ),
+          height: Math.max(
+            size.height,
+            contentNode.deviceLayout.y + contentNode.deviceLayout.height,
+            toolbarNode.deviceLayout.y + toolbarNode.deviceLayout.height,
+          ),
         };
         // Content layer (z=0)
         const contentBuffer = new ShmGraphicBuffer(size.width * size.height * 4);
         // Base canvas in the terminal background so uncovered gaps match the split.
-        contentBuffer.write(Buffer.alloc(size.width * size.height * 4).fill(coverPixel(terminal, Boolean(terminalReview))), size.width);
+        contentBuffer.write(
+          Buffer.alloc(size.width * size.height * 4).fill(
+            coverPixel(terminal, Boolean(terminalReview)),
+          ),
+          size.width,
+        );
         out.placeCursor({ x: 0, y: 0 });
         const contentFrame = (graphics?.paintInitialFrame ?? paintInitialFrame)(
           contentBuffer,
@@ -610,8 +665,15 @@ export async function createWindowWithToolbar(
           },
         );
         // Blend before Kitty dims inactive splits; separate placements become translucent independently.
-        const cRef = registerPaintedContent(contentFrame, content, contentNode, terminal, isActive,
-          undefined, { window: toolbar, layout: toolbarNode });
+        const cRef = registerPaintedContent(
+          contentFrame,
+          content,
+          contentNode,
+          terminal,
+          isActive,
+          undefined,
+          { window: toolbar, layout: toolbarNode },
+        );
 
         destructors.push(cRef.destroy, contentFrame.free);
         refreshers.push(cRef.refresh);
@@ -636,6 +698,7 @@ export async function createWindowWithToolbar(
           terminal,
           isActive,
           true,
+          (image) => withPopup(image, view.popup, contentNode.deviceLayout),
         );
         destructors.push(tRef.destroy, cRef.destroy);
         refreshers.push(tRef.refresh, cRef.refresh);
@@ -648,11 +711,17 @@ export async function createWindowWithToolbar(
       if (toolbarLoaded) return;
       toolbarLoaded = true;
       if (options.dev) {
-        toolbar.webContents.loadURL(`http://localhost:${TOOLBAR_PORT}?terminalScheme=${terminal?.identity.terminalScheme ?? 'dark'}&terminalBackground=${encodeURIComponent(terminal?.identity.terminalBackground ?? '')}`);
+        toolbar.webContents.loadURL(
+          `http://localhost:${TOOLBAR_PORT}?terminalScheme=${terminal?.identity.terminalScheme ?? 'dark'}&terminalBackground=${encodeURIComponent(terminal?.identity.terminalBackground ?? '')}`,
+        );
       } else {
         resetForFrameQuirk(toolbar.webContents);
         toolbar.webContents.loadFile(path.join(assetDirectory, 'toolbar/index.html'), {
-          query: { terminalScheme: terminal?.identity.terminalScheme ?? 'dark', terminalBackground: terminal?.identity.terminalBackground ?? '' },
+          query: {
+            terminalScheme: terminal?.identity.terminalScheme ?? 'dark',
+            terminalBackground: terminal?.identity.terminalBackground ?? '',
+            ...(barHeight ? { urlBar: 'top', barHeight: String(barHeight) } : {}),
+          },
         });
       }
       toolbar.webContents.invalidate();
@@ -734,44 +803,38 @@ export async function createWindowWithToolbar(
           return { action: 'deny' as const };
         }
         console_.log('[Navigation] Popup requested:', url);
-        // Parse requested popup dimensions from window.open features string, e.g. "width=500,height=600"
-        const featureMap = new Map(
-          (typeof features === 'string' ? features : '').split(',').map((f) => {
-            const [k, v] = f.split('=');
-            return [k.trim(), v?.trim()];
-          }),
-        );
-        const requestedWidth = parseInt(featureMap.get('width') || '', 10);
-        const requestedHeight = parseInt(featureMap.get('height') || '', 10);
         const [contentW, contentH] = content.getContentSize();
-        // Use requested size if available and positive, otherwise fall back to full content size
-        const w =
-          Number.isFinite(requestedWidth) && requestedWidth > 0
-            ? Math.min(requestedWidth, contentW)
-            : contentW;
-        const h =
-          Number.isFinite(requestedHeight) && requestedHeight > 0
-            ? Math.min(requestedHeight, contentH)
-            : contentH;
-        console_.log(
-          `[Popup] Creating popup with dimensions ${w}x${h} (requested: ${requestedWidth || 'none'}x${requestedHeight || 'none'}, content: ${contentW}x${contentH})`,
-        );
+        const size = requestedPopupSize(typeof features === 'string' ? features : '', {
+          width: contentW,
+          height: contentH,
+        });
+        console_.log(`[Popup] Drawing ${size.width}x${size.height} popup over the page`);
 
-        // Use native Electron window handling!
-        // By returning action: 'allow' and explicitly disabling offscreen,
-        // Chromium will natively link window.opener and handle trusted MessageEvents,
-        // perfectly supporting Google Identity Services.
+        // Chromium links window.opener (what Google Identity Services needs) only for a
+        // real window, and a window opened by window.open cannot be made off-screen after
+        // the fact: so it is a normal one, parked far off any display, with its frames
+        // captured and drawn over the page by the terminal. See 'did-create-window'.
         return {
           action: 'allow' as const,
           overrideBrowserWindowOptions: {
-            show: true,
-            width: w,
-            height: h,
+            // Shown inactive once made invisible: show() would activate this app and take
+            // the keyboard and mouse from the terminal.
+            show: false,
+            opacity: 0,
+            x: -30000,
+            y: -30000,
+            width: size.width,
+            height: size.height,
+            frame: false,
+            focusable: false,
+            skipTaskbar: true,
+            hasShadow: false,
             webPreferences: {
-              offscreen: false, // Must be false so the native window paints correctly
               sandbox: true,
               contextIsolation: true,
               nodeIntegration: false,
+              zoomFactor: 1,
+              backgroundThrottling: false,
             },
           },
         };
@@ -783,6 +846,90 @@ export async function createWindowWithToolbar(
 
     toolbar.webContents.setWindowOpenHandler(handleNewWindow);
     content.webContents.setWindowOpenHandler(handleNewWindow);
+
+    // A popup is drawn into the page's own frame, centred, until it closes: the terminal
+    // still shows one image (two overlapping images were shown striped).
+    content.webContents.on('did-create-window', (popup) => {
+      view.popup?.window.close(); // one at a time
+      const [width, height] = popup.getContentSize();
+      const dpr = layoutContainer.devicePixelRatio;
+      const node = row({ width: px(width), height: px(height), tag: 'popup' });
+      // In pane coordinates (what the mouse reports): the page may sit below a top bar.
+      const inPage = popupRect(
+        { width: contentNode.deviceLayout.width, height: contentNode.deviceLayout.height },
+        { width, height },
+        dpr,
+      );
+      node.deviceLayout = {
+        ...inPage,
+        x: inPage.x + contentNode.deviceLayout.x,
+        y: inPage.y + contentNode.deviceLayout.y,
+      };
+      node.computedLayout = {
+        x: Math.floor(node.deviceLayout.x / dpr),
+        y: Math.floor(node.deviceLayout.y / dpr),
+        width,
+        height,
+      };
+      const state: NonNullable<WindowView['popup']> = { window: popup, node };
+      view.popup = state;
+      // macOS keeps a window on a display, so it cannot be parked off-screen: make it invisible.
+      popup.setOpacity(0);
+      popup.setIgnoreMouseEvents(true);
+      popup.showInactive();
+      // It is never focused (that would take focus from the terminal), so its page is told it
+      // has focus: carets show and typed keys reach the focused field. Held until it closes.
+      let focusLease: ReturnType<typeof debuggerManager.acquire> | undefined;
+      try {
+        focusLease = debuggerManager.acquire(popup.webContents);
+        focusLease
+          .sendCommand('Emulation.setFocusEmulationEnabled', { enabled: true })
+          .catch(() => {});
+      } catch {
+        // Without it the popup still shows and takes clicks.
+      }
+      // The compositor sends a frame per vsync even for a static popup: handle at most ~15 a
+      // second, always the latest, so the last frame after a change is never dropped.
+      let latest: NativeImage | undefined;
+      let frameTimer: ReturnType<typeof setTimeout> | undefined;
+      let lastFrameAt = 0;
+      const handleFrame = () => {
+        frameTimer = undefined;
+        const image = latest;
+        latest = undefined;
+        if (!image || popup.isDestroyed()) return;
+        lastFrameAt = Date.now();
+        // The native window draws at the display's scale; the page frame is at the layout's.
+        const want = node.deviceLayout;
+        const size = image.getSize();
+        const scaled =
+          size.width === want.width && size.height === want.height
+            ? image
+            : image.resize({ width: want.width, height: want.height });
+        const bitmap = scaled.toBitmap();
+        // Ignore a frame identical to the last: repainting the page for it is wasted work.
+        if (state.frame && Buffer.compare(state.frame.bitmap, bitmap) === 0) return;
+        state.frame = { bitmap, ...scaled.getSize() };
+        // The page paints only on change; make it paint so this frame is blended in.
+        if (!content.isDestroyed()) content.webContents.invalidate();
+      };
+      popup.webContents.beginFrameSubscription(false, (image) => {
+        latest = image;
+        if (frameTimer) return;
+        frameTimer = setTimeout(handleFrame, Math.max(0, 66 - (Date.now() - lastFrameAt)));
+      });
+      popup.once('closed', () => {
+        if (frameTimer) clearTimeout(frameTimer);
+        try {
+          focusLease?.release();
+        } catch {
+          // Already detached with the closed window.
+        }
+        if (view.popup === state) view.popup = undefined;
+        view.focusedContent = content.webContents;
+        if (!content.isDestroyed()) content.webContents.invalidate();
+      });
+    });
 
     content.webContents.on('will-navigate', (_event, url) => {
       const displayUrl = url.length > 100 ? `${url.substring(0, 100)}...` : url;
@@ -823,6 +970,7 @@ export async function createWindowWithToolbar(
 
     content.webContents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
       if (isMainFrame && !isInPlace) {
+        view.popup?.window.close(); // the page it belonged to is gone
         const displayUrl = url.length > 100 ? `${url.substring(0, 100)}...` : url;
         console_.log(
           `[Navigation] Main frame hard navigation to: ${displayUrl}, ensuring display freeze...`,
@@ -880,6 +1028,8 @@ export async function createWindowWithToolbar(
       toolbarLayoutContainer,
       toolbarNode,
       contentNode,
+      topBarHeight: barHeight,
+      barNode,
       omniboxVisible,
       findVisible: false,
       designMode: design,
@@ -901,8 +1051,18 @@ export async function createWindowWithToolbar(
         if (terminalReview && this.designMode && !relayoutForced) {
           try {
             const current = terminal?.size ?? getWindowSize();
-            if (!designResizePending && current.width === lastWidth && current.height === lastHeight) return;
-            if (designResizePending && current.width === pendingResizeWidth && current.height === pendingResizeHeight) return;
+            if (
+              !designResizePending &&
+              current.width === lastWidth &&
+              current.height === lastHeight
+            )
+              return;
+            if (
+              designResizePending &&
+              current.width === pendingResizeWidth &&
+              current.height === pendingResizeHeight
+            )
+              return;
             pendingResizeWidth = current.width;
             pendingResizeHeight = current.height;
           } catch (error) {
@@ -976,7 +1136,8 @@ export async function createWindowWithToolbar(
           toolbar.webContents.invalidate();
           content.webContents.invalidate();
 
-          if (this.designMode || this.omniboxVisible || this.findVisible) view.toolbar.focusOnWebView();
+          if (this.designMode || this.omniboxVisible || this.findVisible)
+            view.toolbar.focusOnWebView();
           else view.content.focusOnWebView();
         });
       },
@@ -1013,7 +1174,10 @@ export async function createWindowWithToolbar(
         }
 
         this.toolbar.setIgnoreMouseEvents(
-          !this.omniboxVisible && !this.keyHelpVisible && !this.findVisible && !this.permissionPending,
+          !this.omniboxVisible &&
+            !this.keyHelpVisible &&
+            !this.findVisible &&
+            !this.permissionPending,
         );
         if (this.omniboxVisible || this.permissionPending) {
           this.toolbar.focusOnWebView();
@@ -1090,9 +1254,18 @@ export async function createWindowWithToolbar(
                 const pngDims = { width: img.getSize().width, height: img.getSize().height };
                 currentCaptureMeta = { captureId, captureSha256, pngDims };
 
-                const codeSource = this.adbMode ? undefined : await readCodeSource(this.content.webContents.getURL());
-                if (!this.designMode || this.destroyed || currentCaptureMeta?.captureId !== captureId) return;
-                const source = codeSource ?? (this.adbMode
+                const codeSource = this.adbMode
+                  ? undefined
+                  : await readCodeSource(this.content.webContents.getURL());
+                if (
+                  !this.designMode ||
+                  this.destroyed ||
+                  currentCaptureMeta?.captureId !== captureId
+                )
+                  return;
+                const source =
+                  codeSource ??
+                  (this.adbMode
                     ? {
                         kind: 'adb' as const,
                         serial: this.adbSerial || 'emulator',
@@ -1107,7 +1280,12 @@ export async function createWindowWithToolbar(
                       });
                 currentCaptureMeta.source = source;
                 const sendFrame = () => {
-                  if (!this.designMode || this.destroyed || currentCaptureMeta?.captureId !== captureId) return;
+                  if (
+                    !this.designMode ||
+                    this.destroyed ||
+                    currentCaptureMeta?.captureId !== captureId
+                  )
+                    return;
                   this.toolbar.webContents.send('awrit:design-frozen-frame', {
                     png,
                     width: pngDims.width,
@@ -1143,9 +1321,13 @@ export async function createWindowWithToolbar(
                   console_.error('[Design] Failed to persist frozen capture PNG:', e);
                 }
                 try {
-                  const snapshot = this.adbMode ? undefined : await readCodeSnapshot(this.content.webContents.getURL());
+                  const snapshot = this.adbMode
+                    ? undefined
+                    : await readCodeSnapshot(this.content.webContents.getURL());
                   saveReviewCapture(png, captureId, source, snapshot);
-                } catch (error) { console_.error('[Design] Failed to save design capture:', error); }
+                } catch (error) {
+                  console_.error('[Design] Failed to save design capture:', error);
+                }
               })
               .catch((err) => {
                 console_.error('Failed to capture page for design mode', err);
@@ -1169,7 +1351,11 @@ export async function createWindowWithToolbar(
           // Re-registration during a suppressed resize may have no page buffer yet.
           this.content.webContents.invalidate();
           sendDesignModeSignal();
-          const toolbarOwnsInput = this.findVisible || this.omniboxVisible || this.keyHelpVisible || this.permissionPending;
+          const toolbarOwnsInput =
+            this.findVisible ||
+            this.omniboxVisible ||
+            this.keyHelpVisible ||
+            this.permissionPending;
           this.toolbar.setIgnoreMouseEvents(!toolbarOwnsInput);
           const inputOwner = toolbarOwnsInput ? this.toolbar : this.content;
           inputOwner.focusOnWebView();
@@ -1418,7 +1604,6 @@ export async function createWindowWithToolbar(
       view.toolbar.webContents.send('awrit:input-focus-changed', focused);
     };
 
-
     const onEnterDesignMode = (event: IpcMainEvent) => {
       if (event.sender !== toolbar.webContents || view.designMode) return;
       view.toggleDesignMode();
@@ -1460,7 +1645,8 @@ export async function createWindowWithToolbar(
       try {
         // Both windows use CSS coordinates; display DPR cancels out. Only
         // their relative page zoom changes the coordinate mapping.
-        const inspectionScale = content.webContents.getZoomFactor() / toolbar.webContents.getZoomFactor();
+        const inspectionScale =
+          content.webContents.getZoomFactor() / toolbar.webContents.getZoomFactor();
         const script = `
         (() => {
           try {
@@ -1689,6 +1875,17 @@ export async function createWindowWithToolbar(
     });
 
     if (view.omniboxVisible) loadToolbarContent();
+    if (barHeight) {
+      // The top bar is always on screen: its page cannot wait for first use, and its back
+      // and forward buttons need the history's state as soon as it has loaded.
+      toolbar.webContents.on('did-finish-load', () => {
+        toolbar.webContents.send('content:navigation-state-changed', {
+          canGoBack: content.webContents.navigationHistory.canGoBack(),
+          canGoForward: content.webContents.navigationHistory.canGoForward(),
+        });
+      });
+      loadToolbarContent();
+    }
     designIpc.initializeTerminalReview();
 
     // Trigger an initial relayout to ensure focus and size are perfectly synced
@@ -1715,12 +1912,17 @@ function updateViewSizes(view: WindowView, { width, height }: WindowDimensions) 
 
   view.toolbarNode.width = px(width);
   view.toolbarNode.height = px(height);
+  const bar = view.topBarHeight ?? 0;
   view.contentNode.width = px(width);
-  view.contentNode.height = px(height);
-  calculateLayout(view.layoutContainer, [view.contentNode]);
+  view.contentNode.height = px(height - bar);
+  if (view.barNode) view.barNode.width = px(width);
+  calculateLayout(
+    view.layoutContainer,
+    bar && view.barNode ? [view.barNode, view.contentNode] : [view.contentNode],
+  );
   calculateLayout(view.toolbarLayoutContainer, [view.toolbarNode]);
   view.toolbar.setContentSize(width, height);
-  view.content.setContentSize(width, height);
+  view.content.setContentSize(width, height - bar);
 }
 
 function setupToolbarIPC(
@@ -1757,7 +1959,14 @@ function setupToolbarIPC(
     'toolbar:toggle-key-help': () => view.toggleKeyHelp(),
     'toolbar:select-tab': (_event: unknown, index: number) => {
       const actions = view.terminal?.actions;
-      if (!view.omniboxVisible || !actions || !Number.isInteger(index) || index < 0 || index >= actions.list().length) return;
+      if (
+        !view.omniboxVisible ||
+        !actions ||
+        !Number.isInteger(index) ||
+        index < 0 ||
+        index >= actions.list().length
+      )
+        return;
       view.toggleOmnibox();
       actions.select(index);
     },
@@ -1766,7 +1975,8 @@ function setupToolbarIPC(
       if (!view.omniboxVisible || !actions || !Number.isInteger(index) || index < 0) return;
       actions.closeTabAt(index);
       const tabs = actions.list();
-      if (view.omniboxVisible && tabs.length) view.toolbar.webContents.send('omnibox:set-tabs', tabs);
+      if (view.omniboxVisible && tabs.length)
+        view.toolbar.webContents.send('omnibox:set-tabs', tabs);
     },
     'toolbar:site-info-open': (_event: unknown, open: boolean) => {
       view.siteInfoOpen = open === true;
@@ -1822,11 +2032,19 @@ function setupToolbarIPC(
   let settleTimer: NodeJS.Timeout | null = null;
 
   const onPageZoomKey = (event: Electron.Event, input: Electron.Input) => {
-    if (input.type !== 'keyDown' || input.alt || (!input.control && !input.meta) || view.designMode || contentContents.isDestroyed()) return;
+    if (
+      input.type !== 'keyDown' ||
+      input.alt ||
+      (!input.control && !input.meta) ||
+      view.designMode ||
+      contentContents.isDestroyed()
+    )
+      return;
     if (!['+', '=', '-', '_', '0'].includes(input.key)) return;
     event.preventDefault();
     const current = contentContents.getZoomFactor();
-    const factor = input.key === '0' ? 1 : current + (input.key === '-' || input.key === '_' ? -0.1 : 0.1);
+    const factor =
+      input.key === '0' ? 1 : current + (input.key === '-' || input.key === '_' ? -0.1 : 0.1);
     handlers['toolbar:set-zoom'](event, Math.round(factor * 10) / 10);
   };
   contentContents.on('before-input-event', onPageZoomKey);

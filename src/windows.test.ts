@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { console_ } from './console';
+import { requestedPopupSize } from './popup';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import type net from 'node:net';
 import { tmpdir } from 'node:os';
@@ -395,6 +396,7 @@ test('a plain link to a local page opens as a tab instead of a native window', (
     console_: { log() {} },
     path: require('node:path'),
     assetDirectory: '/assets',
+    requestedPopupSize,
   });
   vm.runInContext(
     `${new Bun.Transpiler({ loader: 'ts' }).transformSync(block)}\nglobalThis.handleNewWindow = handleNewWindow;`,
@@ -419,9 +421,11 @@ test('a plain link to a local page opens as a tab instead of a native window', (
   for (const url of ['data:text/html,page', 'about:blank', 'javascript:void 0']) {
     expect(request(url).action).toBe('allow');
   }
+  // A sized popup is a real window (for window.opener) but an invisible one, shown inactive
+  // later: its frames are drawn over the page in the terminal.
   expect(request('https://accounts.example/', 'width=500,height=600')).toMatchObject({
     action: 'allow',
-    overrideBrowserWindowOptions: { show: true },
+    overrideBrowserWindowOptions: { show: false, opacity: 0, width: 500, height: 600 },
   });
   expect(opened).toEqual([]);
 });
