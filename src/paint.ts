@@ -1,4 +1,5 @@
 import { frameTrace } from './frameTrace';
+import { WHITE_HOLD_MS, holdWhiteFrame } from './whiteHold';
 import { ShmGraphicBuffer, getWindowSize as rawGetWindowSize } from 'awrit-native-rs';
 import { rememberTabThumbnail } from './tabThumbnail';
 import type { BrowserWindow, NativeImage, Rectangle } from 'electron';
@@ -382,6 +383,8 @@ export function registerPaintedContentFallback(
   let paintedImage: PaintedImage | undefined;
   let reuseBuffer = false;
   let destroyed = false;
+  let whiteSince: number | undefined;
+  let whiteTimer: ReturnType<typeof setTimeout> | undefined;
   const previous = weakPaintedContents_.get(w)?.snapshot?.();
   let lastBitmap = previous?.bitmap;
   let lastImageSize = previous?.size;
@@ -403,6 +406,7 @@ export function registerPaintedContentFallback(
     },
     destroy() {
       destroyed = true;
+      if (whiteTimer) clearTimeout(whiteTimer);
       contents.off('paint', paint);
       result.buffer = undefined;
       paintedImage?.free();
@@ -483,13 +487,22 @@ export function registerPaintedContentFallback(
     if (replace && paintedImage) {
       const bitmap = image.toBitmap();
 
-      // Flash Killer for Fallback mode
-      if ((w as any).paintCount < 60) {
-        if (isMostlyWhite(bitmap, imageSize.width, imageSize.height)) {
-          (w as any).paintCount++;
-          return;
-        }
+      // Flash Killer for Fallback mode. Limited in time: see whiteHold.ts.
+      if (
+        (w as any).paintCount < 60 &&
+        holdWhiteFrame((w as any).paintCount, whiteSince === undefined ? 0 : Date.now() - whiteSince) &&
+        isMostlyWhite(bitmap, imageSize.width, imageSize.height)
+      ) {
+        (w as any).paintCount++;
+        whiteSince ??= Date.now();
+        // A static page sends no further frame: ask for one when the hold runs out.
+        whiteTimer ??= setTimeout(() => {
+          whiteTimer = undefined;
+          if (!destroyed && !contents.isDestroyed()) contents.invalidate();
+        }, WHITE_HOLD_MS + 20);
+        return;
       }
+      whiteSince = undefined;
 
       lastBitmap = bitmap;
       startBatch();
