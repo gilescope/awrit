@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { WHITE_HOLD_MS, holdWhiteFrame } from './whiteHold';
+import { WHITE_HOLD_MS, WHITE_PAGE, holdWhiteFrame } from './whiteHold';
 
 describe('holdWhiteFrame', () => {
   test('a white frame is held back briefly while a page is still arriving', () => {
@@ -15,5 +15,12 @@ describe('holdWhiteFrame', () => {
 
   test('a busy page stops being held after 60 paints, as before', () => {
     expect(holdWhiteFrame(60, 0)).toBe(false);
+  });
+});
+
+describe('WHITE_PAGE', () => {
+  test('marks a page as simply white: none of its later frames is held', () => {
+    // Typing into a white form repaints it each keystroke; a hold per frame is 300 ms of lag.
+    expect(holdWhiteFrame(WHITE_PAGE, 0)).toBe(false);
   });
 });

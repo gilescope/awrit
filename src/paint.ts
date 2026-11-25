@@ -1,5 +1,5 @@
 import { frameTrace } from './frameTrace';
-import { WHITE_HOLD_MS, holdWhiteFrame } from './whiteHold';
+import { WHITE_HOLD_MS, WHITE_PAGE, holdWhiteFrame } from './whiteHold';
 import { ShmGraphicBuffer, getWindowSize as rawGetWindowSize } from 'awrit-native-rs';
 import { rememberTabThumbnail } from './tabThumbnail';
 import type { BrowserWindow, NativeImage, Rectangle } from 'electron';
@@ -488,19 +488,21 @@ export function registerPaintedContentFallback(
       const bitmap = image.toBitmap();
 
       // Flash Killer for Fallback mode. Limited in time: see whiteHold.ts.
-      if (
-        (w as any).paintCount < 60 &&
-        holdWhiteFrame((w as any).paintCount, whiteSince === undefined ? 0 : Date.now() - whiteSince) &&
-        isMostlyWhite(bitmap, imageSize.width, imageSize.height)
-      ) {
-        (w as any).paintCount++;
-        whiteSince ??= Date.now();
-        // A static page sends no further frame: ask for one when the hold runs out.
-        whiteTimer ??= setTimeout(() => {
-          whiteTimer = undefined;
-          if (!destroyed && !contents.isDestroyed()) contents.invalidate();
-        }, WHITE_HOLD_MS + 20);
-        return;
+      if ((w as any).paintCount < 60 && isMostlyWhite(bitmap, imageSize.width, imageSize.height)) {
+        const heldMs = whiteSince === undefined ? 0 : Date.now() - whiteSince;
+        if (holdWhiteFrame((w as any).paintCount, heldMs)) {
+          (w as any).paintCount++;
+          whiteSince ??= Date.now();
+          // A static page sends no further frame: ask for one when the hold runs out.
+          whiteTimer ??= setTimeout(() => {
+            whiteTimer = undefined;
+            if (!destroyed && !contents.isDestroyed()) contents.invalidate();
+          }, WHITE_HOLD_MS + 20);
+          return;
+        }
+        // The hold ran out: this page is simply white. Stop holding its frames until the
+        // next navigation resets the count.
+        (w as any).paintCount = WHITE_PAGE;
       }
       whiteSince = undefined;
 

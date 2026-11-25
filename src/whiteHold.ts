@@ -8,7 +8,14 @@
 /** How long a near-white frame may be held back before it is shown anyway. */
 export const WHITE_HOLD_MS = 300;
 
+/**
+ * The paint count from which no frame is held. Reached by counting held frames, or set outright
+ * once a hold has run out: the page is then known to be simply white, and holding each later
+ * frame (one per keystroke in a form) would only add lag.
+ */
+export const WHITE_PAGE = 60;
+
 /** Whether a near-white frame should still be held back, `heldMs` after the first one was. */
 export function holdWhiteFrame(paintCount: number, heldMs: number): boolean {
-  return paintCount < 60 && heldMs < WHITE_HOLD_MS;
+  return paintCount < WHITE_PAGE && heldMs < WHITE_HOLD_MS;
 }
