@@ -8,11 +8,13 @@ export function withPopup(
     node: { deviceLayout: Rect };
     frame?: { bitmap: Buffer; width: number; height: number };
   },
+  /** Where the page frame sits in the pane; the popup's place is in pane coordinates. */
+  origin: { x: number; y: number } = { x: 0, y: 0 },
 ): NativeImage {
   if (!popup?.frame) return page;
   const { width, height } = page.getSize();
   const bitmap = Buffer.from(page.toBitmap());
   const at = popup.node.deviceLayout;
-  blitBgra(bitmap, width, popup.frame.bitmap, popup.frame.width, popup.frame.height, at.x, at.y);
+  blitBgra(bitmap, width, popup.frame.bitmap, popup.frame.width, popup.frame.height, at.x - origin.x, at.y - origin.y);
   return nativeImage.createFromBitmap(bitmap, { width, height });
 }

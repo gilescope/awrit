@@ -3,6 +3,8 @@ import type { JSX } from 'solid-js';
 // Lucide-style outline icons (ISC licence): 24px grid, rounded 1.75px strokes.
 const paths = {
   back: 'm12 19-7-7 7-7M19 12H5',
+  forward: 'm12 5 7 7-7 7M5 12h14',
+  reload: 'M21 12a9 9 0 1 1-2.64-6.36L21 8M21 3v5h-5',
   'chevron-left': 'm15 18-6-6 6-6',
   'chevron-right': 'm9 18 6-6-6-6',
   'chevron-up': 'm18 15-6-6-6 6',

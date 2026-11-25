@@ -129,6 +129,10 @@ export type WindowView = {
   toolbarLayoutContainer: LayoutContainer;
   toolbarNode: LayoutNode;
   contentNode: LayoutNode;
+  /** Height of the top bar strip in layout pixels; 0 or absent when there is none. */
+  topBarHeight?: number;
+  /** The strip's place in the layout, above the page. */
+  barNode?: LayoutNode;
   /** A page's `window.open` popup, drawn over the page; it takes the keyboard and mouse while open. */
   popup?: {
     window: BrowserWindow;
@@ -219,6 +223,8 @@ export async function createWindowWithToolbar(
   initialUrl = 'https://github.com/chase/awrit',
   windowOptions: {
     urlBarVisible?: boolean;
+    /** Height of a top bar strip (back, forward, reload, address); 0 or absent for none. */
+    topBar?: number;
     adbMode?: boolean;
     adbSerial?: string;
     onResize?: (size: WindowDimensions) => void;
@@ -268,13 +274,20 @@ export async function createWindowWithToolbar(
     let toolbarLoaded = false;
 
     const toolbarNode = row({ width: px(size.width), height: px(size.height), tag: 'omnibox' });
-    const contentNode = row({ width: px(size.width), height: px(size.height), tag: 'content' });
+    // A device mirror has its own controls; everything else may have the top bar.
+    const barHeight = windowOptions.adbMode ? 0 : (windowOptions.topBar ?? 0);
+    const barNode = row({ width: px(size.width), height: px(barHeight), tag: 'bar' });
+    const contentNode = row({
+      width: px(size.width),
+      height: px(size.height - barHeight),
+      tag: 'content',
+    });
 
     const terminalFeatures = terminal?.features ?? features.current;
     const hasAnimation =
       !windowOptions.adbMode && terminalFeatures?.loadFrame && terminalFeatures.compositeFrame;
 
-    calculateLayout(layoutContainer, [contentNode]);
+    calculateLayout(layoutContainer, barHeight ? [barNode, contentNode] : [contentNode]);
     calculateLayout(toolbarLayoutContainer, [toolbarNode]);
 
     let destroyed = false;
@@ -685,7 +698,7 @@ export async function createWindowWithToolbar(
           terminal,
           isActive,
           true,
-          (image) => withPopup(image, view.popup),
+          (image) => withPopup(image, view.popup, contentNode.deviceLayout),
         );
         destructors.push(tRef.destroy, cRef.destroy);
         refreshers.push(tRef.refresh, cRef.refresh);
@@ -707,6 +720,7 @@ export async function createWindowWithToolbar(
           query: {
             terminalScheme: terminal?.identity.terminalScheme ?? 'dark',
             terminalBackground: terminal?.identity.terminalBackground ?? '',
+            ...(barHeight ? { urlBar: 'top', barHeight: String(barHeight) } : {}),
           },
         });
       }
@@ -840,11 +854,17 @@ export async function createWindowWithToolbar(
       const [width, height] = popup.getContentSize();
       const dpr = layoutContainer.devicePixelRatio;
       const node = row({ width: px(width), height: px(height), tag: 'popup' });
-      node.deviceLayout = popupRect(
+      // In pane coordinates (what the mouse reports): the page may sit below a top bar.
+      const inPage = popupRect(
         { width: contentNode.deviceLayout.width, height: contentNode.deviceLayout.height },
         { width, height },
         dpr,
       );
+      node.deviceLayout = {
+        ...inPage,
+        x: inPage.x + contentNode.deviceLayout.x,
+        y: inPage.y + contentNode.deviceLayout.y,
+      };
       node.computedLayout = {
         x: Math.floor(node.deviceLayout.x / dpr),
         y: Math.floor(node.deviceLayout.y / dpr),
@@ -1008,6 +1028,8 @@ export async function createWindowWithToolbar(
       toolbarLayoutContainer,
       toolbarNode,
       contentNode,
+      topBarHeight: barHeight,
+      barNode,
       omniboxVisible,
       findVisible: false,
       designMode: design,
@@ -1853,6 +1875,17 @@ export async function createWindowWithToolbar(
     });
 
     if (view.omniboxVisible) loadToolbarContent();
+    if (barHeight) {
+      // The top bar is always on screen: its page cannot wait for first use, and its back
+      // and forward buttons need the history's state as soon as it has loaded.
+      toolbar.webContents.on('did-finish-load', () => {
+        toolbar.webContents.send('content:navigation-state-changed', {
+          canGoBack: content.webContents.navigationHistory.canGoBack(),
+          canGoForward: content.webContents.navigationHistory.canGoForward(),
+        });
+      });
+      loadToolbarContent();
+    }
     designIpc.initializeTerminalReview();
 
     // Trigger an initial relayout to ensure focus and size are perfectly synced
@@ -1879,12 +1912,17 @@ function updateViewSizes(view: WindowView, { width, height }: WindowDimensions) 
 
   view.toolbarNode.width = px(width);
   view.toolbarNode.height = px(height);
+  const bar = view.topBarHeight ?? 0;
   view.contentNode.width = px(width);
-  view.contentNode.height = px(height);
-  calculateLayout(view.layoutContainer, [view.contentNode]);
+  view.contentNode.height = px(height - bar);
+  if (view.barNode) view.barNode.width = px(width);
+  calculateLayout(
+    view.layoutContainer,
+    bar && view.barNode ? [view.barNode, view.contentNode] : [view.contentNode],
+  );
   calculateLayout(view.toolbarLayoutContainer, [view.toolbarNode]);
   view.toolbar.setContentSize(width, height);
-  view.content.setContentSize(width, height);
+  view.content.setContentSize(width, height - bar);
 }
 
 function setupToolbarIPC(

@@ -153,6 +153,32 @@ body {
     z-index: 1000;
   }
 
+  /* With the top bar, the address palette drops from the bar instead of floating mid-page. */
+  .zen-fixed-wrapper.under-top-bar { align-items: flex-start; padding-top: 6px; }
+
+  /* The top bar: a strip above the page (the owner lays the page out below it). */
+  .top-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
+    background-color: var(--palette-bg);
+    border-bottom: 1px solid var(--palette-border);
+    color: var(--text-primary);
+    pointer-events: auto;
+    z-index: 900;
+  }
+  .top-bar-btn { flex: none; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; border: none; border-radius: 8px; background: transparent; color: var(--text-muted); cursor: pointer; }
+  .top-bar-btn:hover:not(:disabled) { color: var(--text-primary); background: #2b2a33; }
+  .top-bar-btn:disabled { opacity: 0.35; cursor: default; }
+  .top-bar-url { flex: 1; min-width: 0; height: 40px; padding: 0 16px; border: 1px solid var(--palette-border); border-radius: 20px; background: #1a1c1f; color: var(--text-primary); font-size: 20px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
+  .top-bar-url:hover { background: #2b2a33; }
+
   .zen-backdrop {
     position: fixed;
     inset: 0;

@@ -51,6 +51,12 @@ export function Toolbar() {
   const [loadingUrl, setLoadingUrl] = createSignal('');
   const [lastCommittedUrl, setLastCommittedUrl] = createSignal('');
   const [omniboxVisible, setOmniboxVisible] = createSignal(false);
+  // The top bar: a strip above the page, asked for by the owner in the page's query.
+  const query = new URLSearchParams(window.location.search);
+  const topBar = query.get('urlBar') === 'top';
+  const topBarHeight = Number.parseInt(query.get('barHeight') ?? '', 10) || 56;
+  const [canGoBack, setCanGoBack] = createSignal(false);
+  const [canGoForward, setCanGoForward] = createSignal(false);
   const [openTabs, setOpenTabs] = createSignal<OpenTab[]>([]);
   window.ipc.onSetTabs((tabs) => setOpenTabs(tabs));
   const [history, setHistory] = createSignal<HistoryItem[]>([]);
@@ -100,6 +106,10 @@ export function Toolbar() {
     setDesignModeActive(active);
   });
   window.ipc.onZoomChanged((factor: number) => setZoom(factor));
+  window.ipc.onNavigationStateChanged((state: { canGoBack: boolean; canGoForward: boolean }) => {
+    setCanGoBack(state.canGoBack);
+    setCanGoForward(state.canGoForward);
+  });
   window.ipc.onLoadingProgress((p) => setLoadingProgress(p));
   window.ipc.onLoadingUrl((lUrl) => setLoadingUrl(lUrl));
   window.ipc.onLoadingStopped(() => setLoadingProgress(0));
@@ -575,8 +585,53 @@ export function Toolbar() {
         </div>
       </Show>
 
+      <Show when={topBar && !designModeActive()}>
+        <div class="top-bar" style={{ height: `${topBarHeight}px` }}>
+          <button
+            type="button"
+            class="top-bar-btn"
+            disabled={!canGoBack()}
+            onClick={() => window.ipc.navigateBack()}
+            title="Back"
+            aria-label="Back"
+          >
+            <Icon name="back" class="w-5 h-5" />
+          </button>
+          <button
+            type="button"
+            class="top-bar-btn"
+            disabled={!canGoForward()}
+            onClick={() => window.ipc.navigateForward()}
+            title="Forward"
+            aria-label="Forward"
+          >
+            <Icon name="forward" class="w-5 h-5" />
+          </button>
+          <button
+            type="button"
+            class="top-bar-btn"
+            disabled={!lastCommittedUrl()}
+            onClick={() => window.ipc.navigateTo(lastCommittedUrl())}
+            title="Reload"
+            aria-label="Reload"
+          >
+            <Icon name="reload" class="w-5 h-5" />
+          </button>
+          {/* Editing happens in the address palette, which drops from here. */}
+          <button
+            type="button"
+            class="top-bar-url"
+            onClick={() => window.ipc.toggleUrlBar()}
+            title="Edit address (Ctrl+L)"
+            aria-label="Address"
+          >
+            {lastCommittedUrl() || 'Search or enter address'}
+          </button>
+        </div>
+      </Show>
+
       <Show when={omniboxVisible()}>
-        <div class="zen-fixed-wrapper">
+        <div class="zen-fixed-wrapper" classList={{ 'under-top-bar': topBar }}>
           {/* Transparent layer to catch clicks outside the palette */}
           <div class="zen-backdrop" onMouseDown={() => window.ipc.toggleUrlBar()} />
 

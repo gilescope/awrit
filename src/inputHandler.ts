@@ -1,3 +1,4 @@
+import { mouseTarget } from './topBar';
 import type { TermEvent } from 'awrit-native-rs';
 import { options } from './args';
 import { readLeaderKey } from './designKey';
@@ -352,16 +353,29 @@ export function createInputHandler(
         const { toolbarNode, contentNode, layoutContainer } = view;
         const dpr = layoutContainer.devicePixelRatio;
 
-        const targetWindow = isToolbarActive ? view.toolbar : (view.popup?.window ?? view.content);
+        // The top bar's strip takes the mouse there without taking the keyboard from the page.
+        const target = mouseTarget({
+          y: rawY,
+          barHeight: (view.topBarHeight ?? 0) * dpr,
+          toolbarModal: isToolbarActive,
+          popupOpen: !!view.popup,
+        });
+        const targetWindow =
+          target === 'toolbar' ? view.toolbar : target === 'popup' && view.popup ? view.popup.window : view.content;
         const targetContents = targetWindow.webContents;
 
-        // OPTIMIZED FOCUS: Only focus if not already focused. Never a popup: see the key path.
-        if (view.focusedContent !== targetContents && targetWindow !== view.popup?.window) {
+        // OPTIMIZED FOCUS: Only focus if not already focused. Never a popup (see the key path),
+        // nor the top bar's strip, which must leave the keyboard with the page.
+        if (
+          view.focusedContent !== targetContents &&
+          (target === 'content' || isToolbarActive)
+        ) {
           targetContents.focus();
           view.focusedContent = targetContents;
         }
 
-        const targetNode = isToolbarActive ? toolbarNode : (view.popup?.node ?? contentNode);
+        const targetNode =
+          target === 'toolbar' ? toolbarNode : target === 'popup' && view.popup ? view.popup.node : contentNode;
         const adjustedX = Math.floor((rawX - targetNode.deviceLayout.x) / dpr);
         const adjustedY = Math.floor((rawY - targetNode.deviceLayout.y) / dpr);
 
