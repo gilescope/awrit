@@ -123,6 +123,7 @@ export function createTerminalOutput(sink: (data: string) => unknown) {
         Mode.alternateScreen,
         Mode.mouseSgrPixelMode,
         Mode.mouseMoveTracking,
+        Mode.pixelWheel,
       ],
       true,
     );
@@ -132,7 +133,10 @@ export function createTerminalOutput(sink: (data: string) => unknown) {
 
   const cleanup = () => {
     clearScreen();
-    setModes([Mode.alternateScreen, Mode.mouseMoveTracking, Mode.mouseSgrPixelMode], false);
+    setModes(
+      [Mode.alternateScreen, Mode.mouseMoveTracking, Mode.mouseSgrPixelMode, Mode.pixelWheel],
+      false,
+    );
     setModes([Mode.textCursor], true);
     write(RESTORE_PRIVATE_MODE_VALUES + RESTORE_CURSOR + RESTORE_COLORS);
   };
@@ -164,6 +168,8 @@ export enum Mode {
   mouseUtf8Mode = 1005,
   mouseSgrMode = 1006,
   mouseSgrPixelMode = 1016,
+  /** Trackpad movement as a distance: see pixelWheel.ts. Unknown terminals ignore it. */
+  pixelWheel = 9278,
   alternateScreen = 1049,
   bracketedPaste = 2004,
   pendingUpdate = 2026,

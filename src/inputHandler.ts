@@ -1,3 +1,4 @@
+import { type PixelWheel, parsePixelWheel } from './pixelWheel';
 import { newSwipe, swipeSettings, swipeStep, swipeVertical } from './swipe';
 import { mouseTarget } from './topBar';
 import type { TermEvent } from 'awrit-native-rs';
@@ -107,7 +108,30 @@ export function createInputHandler(
     }
   }
 
-  function handleInput(evt: TermEvent): boolean {
+  /**
+   * Trackpad movement as a distance. Vertical movement scrolls the page by exactly that
+   * distance; sideways movement stays in notches, which is what the swipe counts.
+   */
+  function handlePixelWheel(wheel: PixelWheel): boolean {
+    const at = { x: wheel.x, y: wheel.y, modifiers: [] };
+    let handled = false;
+    const sideways = wheel.ticksX > 0 ? 'scrollLeft' : 'scrollRight';
+    for (let i = 0; i < Math.abs(wheel.ticksX); i++) {
+      handled = handleInput({ eventType: 'mouse', mouseEvent: { kind: sideways, ...at } }) || handled;
+    }
+    if (wheel.dy !== 0) {
+      const kind = wheel.dy > 0 ? 'scrollUp' : 'scrollDown';
+      handled = handleInput({ eventType: 'mouse', mouseEvent: { kind, ...at } }, wheel.dy) || handled;
+    }
+    return handled;
+  }
+
+  /** `pixelsY`: the distance of a vertical wheel event, when the terminal reported one. */
+  function handleInput(evt: TermEvent, pixelsY?: number): boolean {
+    if (evt.eventType === 'escape') {
+      const wheel = parsePixelWheel(evt.escape);
+      return wheel ? handlePixelWheel(wheel) : false;
+    }
     const kind = evt.mouseEvent?.kind;
     if (
       (evt.eventType === 'key' && evt.keyEvent?.down) ||
@@ -424,23 +448,31 @@ export function createInputHandler(
         // wheel still drives page navigation below.)
         if (view.omniboxVisible && !view.permissionPending && (kind === 'scrollUp' || kind === 'scrollDown')) {
           const direction = kind === 'scrollDown' ? 1 : -1;
-          view.toolbar.webContents.send('toolbar:scroll-suggestions', direction * WHEEL_DELTA);
+          const distance = pixelsY === undefined ? WHEEL_DELTA : Math.abs(pixelsY) / dpr;
+          view.toolbar.webContents.send('toolbar:scroll-suggestions', direction * distance);
           return true;
         }
 
         if (kind === 'scrollUp' || kind === 'scrollDown') {
           swipeVertical(swipe);
+          const sign = kind === 'scrollUp' ? 1 : -1;
+          // A phone takes notches. A page takes the distance as it is: Chromium eases a
+          // notch over several frames, and easing a distance that already follows the
+          // fingers (and the system's slow-down after them) would only blur it.
+          const precise = pixelsY !== undefined && !view.adbMode;
+          const notch = view.adbMode ? ADB_WHEEL_DELTA : WHEEL_DELTA;
+          const deltaY = precise ? pixelsY / dpr : sign * notch;
           targetContents.sendInputEvent({
             type: 'mouseWheel',
-            wheelTicksY: kind === 'scrollUp' ? 1 : -1,
+            wheelTicksY: precise ? deltaY / WHEEL_DELTA : sign,
             wheelTicksX: 0,
             deltaX: 0,
-            deltaY: (kind === 'scrollUp' ? 1 : -1) * (view.adbMode ? ADB_WHEEL_DELTA : WHEEL_DELTA),
+            deltaY,
             modifiers: electronMods,
             x: adjustedX,
             y: adjustedY,
-            accelerationRatioY: 0.5,
-            hasPreciseScrollingDeltas: false,
+            accelerationRatioY: precise ? 1 : 0.5,
+            hasPreciseScrollingDeltas: precise,
             canScroll: true,
           });
           return true;
