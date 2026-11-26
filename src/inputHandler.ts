@@ -1,3 +1,4 @@
+import { type PixelWheel, parsePixelWheel } from './pixelWheel';
 import { newSwipe, swipeSettings, swipeStep, swipeVertical } from './swipe';
 import { mouseTarget } from './topBar';
 import type { TermEvent } from 'awrit-native-rs';
@@ -10,6 +11,11 @@ import { createSyntheticInputGuard } from './syntheticInput';
 import { noteUserInput } from './browserOwner/tools/userActivity';
 
 const WHEEL_DELTA = 100;
+/** How far a wheel event moved, in device pixels. */
+type Distance = { dx: number; dy: number };
+/** A notch whose distance arrives in an event of its own: it counts towards a swipe only. */
+const NO_DISTANCE: Distance = { dx: 0, dy: 0 };
+type MouseKind = NonNullable<TermEvent['mouseEvent']>['kind'];
 // SGR wheel reports are discrete ticks, even when they originate from a touchpad.
 const ADB_WHEEL_DELTA = 24;
 const NAVIGATION_COOLDOWN = 500;
@@ -107,7 +113,39 @@ export function createInputHandler(
     }
   }
 
-  function handleInput(evt: TermEvent): boolean {
+  /**
+   * Trackpad movement as a distance, which a page scrolls by exactly. The notches riding
+   * along only count towards a swipe: sent to the page they would start an eased scroll
+   * that fights the distances for its whole animation. A phone takes the notches instead.
+   */
+  function handlePixelWheel(wheel: PixelWheel): boolean {
+    const at = { x: wheel.x, y: wheel.y, modifiers: [] };
+    const send = (kind: MouseKind, distance?: Distance) =>
+      handleInput({ eventType: 'mouse', mouseEvent: { kind, ...at } }, distance);
+    const sideways = wheel.ticksX > 0 ? 'scrollLeft' : 'scrollRight';
+    const vertical = wheel.dy > 0 ? 'scrollUp' : 'scrollDown';
+    let handled = false;
+    if (selectView()?.adbMode) {
+      const notchY = wheel.ticksY > 0 ? 'scrollUp' : 'scrollDown';
+      for (let i = 0; i < Math.abs(wheel.ticksX); i++) handled = send(sideways) || handled;
+      for (let i = 0; i < Math.abs(wheel.ticksY); i++) handled = send(notchY) || handled;
+      return handled;
+    }
+    for (let i = 0; i < Math.abs(wheel.ticksX); i++) handled = send(sideways, NO_DISTANCE) || handled;
+    if (wheel.dx !== 0 || wheel.dy !== 0) {
+      const across = Math.abs(wheel.dx) > Math.abs(wheel.dy);
+      const kind = across ? (wheel.dx > 0 ? 'scrollLeft' : 'scrollRight') : vertical;
+      handled = send(kind, { dx: wheel.dx, dy: wheel.dy }) || handled;
+    }
+    return handled;
+  }
+
+  /** `distance`: how far a wheel event moved, when the terminal reported one. */
+  function handleInput(evt: TermEvent, distance?: Distance): boolean {
+    if (evt.eventType === 'escape') {
+      const wheel = parsePixelWheel(evt.escape);
+      return wheel ? handlePixelWheel(wheel) : false;
+    }
     const kind = evt.mouseEvent?.kind;
     if (
       (evt.eventType === 'key' && evt.keyEvent?.down) ||
@@ -424,18 +462,45 @@ export function createInputHandler(
         // wheel still drives page navigation below.)
         if (view.omniboxVisible && !view.permissionPending && (kind === 'scrollUp' || kind === 'scrollDown')) {
           const direction = kind === 'scrollDown' ? 1 : -1;
-          view.toolbar.webContents.send('toolbar:scroll-suggestions', direction * WHEEL_DELTA);
+          const pixels = distance ? Math.abs(distance.dy) / dpr : WHEEL_DELTA;
+          view.toolbar.webContents.send('toolbar:scroll-suggestions', direction * pixels);
+          return true;
+        }
+
+        const scrolls = kind === 'scrollUp' || kind === 'scrollDown' || kind === 'scrollLeft' || kind === 'scrollRight';
+        if (scrolls && distance && distance !== NO_DISTANCE) {
+          // The distance as it is: Chromium eases a notch over several frames, and easing
+          // a distance that already follows the fingers (and the system's slow-down after
+          // them) would only blur it.
+          if (kind === 'scrollUp' || kind === 'scrollDown') swipeVertical(swipe);
+          const [deltaX, deltaY] = [distance.dx / dpr, distance.dy / dpr];
+          targetContents.sendInputEvent({
+            type: 'mouseWheel',
+            wheelTicksX: deltaX / WHEEL_DELTA,
+            wheelTicksY: deltaY / WHEEL_DELTA,
+            deltaX,
+            deltaY,
+            modifiers: electronMods,
+            x: adjustedX,
+            y: adjustedY,
+            accelerationRatioX: 1,
+            accelerationRatioY: 1,
+            hasPreciseScrollingDeltas: true,
+            canScroll: true,
+          });
           return true;
         }
 
         if (kind === 'scrollUp' || kind === 'scrollDown') {
           swipeVertical(swipe);
+          const sign = kind === 'scrollUp' ? 1 : -1;
+          const deltaY = sign * (view.adbMode ? ADB_WHEEL_DELTA : WHEEL_DELTA);
           targetContents.sendInputEvent({
             type: 'mouseWheel',
-            wheelTicksY: kind === 'scrollUp' ? 1 : -1,
+            wheelTicksY: sign,
             wheelTicksX: 0,
             deltaX: 0,
-            deltaY: (kind === 'scrollUp' ? 1 : -1) * (view.adbMode ? ADB_WHEEL_DELTA : WHEEL_DELTA),
+            deltaY,
             modifiers: electronMods,
             x: adjustedX,
             y: adjustedY,
@@ -463,6 +528,7 @@ export function createInputHandler(
             }
             lastNavigationTime = now;
           }
+          if (distance === NO_DISTANCE) return true;
 
           targetContents.sendInputEvent({
             type: 'mouseWheel',
