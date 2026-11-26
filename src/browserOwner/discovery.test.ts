@@ -50,3 +50,42 @@ test('owner discovery survives different shell temporary directories', () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('AWRIT_USER_DATA_DIR names the owner profile directory, and must be absolute', async () => {
+  const { ownerUserDataDir } = await import('./discovery');
+  expect(ownerUserDataDir({})).toBeUndefined();
+  expect(ownerUserDataDir({ AWRIT_USER_DATA_DIR: '' })).toBeUndefined();
+  expect(ownerUserDataDir({ AWRIT_USER_DATA_DIR: '/data/trial/' })).toBe('/data/trial');
+  // Clients started in different directories must agree on the owner.
+  expect(() => ownerUserDataDir({ AWRIT_USER_DATA_DIR: 'trial' })).toThrow(
+    'AWRIT_USER_DATA_DIR must be an absolute path, found "trial"',
+  );
+});
+
+test('an owner with its own profile directory has its own socket', () => {
+  const tempRoot = process.platform === 'darwin' ? '/tmp' : os.tmpdir();
+  const root = fs.mkdtempSync(path.join(tempRoot, 'awrit-discovery-test-'));
+  try {
+    const runtime = path.join(root, 'runtime');
+    fs.mkdirSync(runtime, { mode: 0o700 });
+    const socket = (userData?: string) => {
+      const env: Record<string, string | undefined> = {
+        ...process.env, XDG_RUNTIME_DIR: runtime, XDG_DATA_HOME: path.join(root, 'data'),
+        AWRIT_USER_DATA_DIR: userData,
+      };
+      if (userData === undefined) delete env.AWRIT_USER_DATA_DIR;
+      const result = Bun.spawnSync([
+        process.execPath, '-e',
+        `import { ownerSocketPath } from ${JSON.stringify(path.join(import.meta.dir, 'discovery.ts'))}; console.log(ownerSocketPath());`,
+      ], { env });
+      expect(result.exitCode).toBe(0);
+      return result.stdout.toString().trim();
+    };
+    const trial = path.join(root, 'trial');
+    expect(socket(trial)).not.toBe(socket());
+    expect(socket(trial)).toBe(socket(trial + path.sep));
+    expect(socket(trial)).not.toBe(socket(path.join(root, 'other')));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

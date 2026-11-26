@@ -99,6 +99,31 @@ describe('socketServer', () => {
     }
   });
 
+  test('getSocketPath follows an owner with its own profile directory', () => {
+    const saved = { ...process.env };
+    let made: string | undefined;
+    try {
+      delete process.env.AWRIT_IPC_SOCKET;
+      delete process.env.AWRIT_USER_DATA_DIR;
+      const shared = getSocketPath();
+      process.env.AWRIT_USER_DATA_DIR = path.join(tmpdir(), 'awrit-ipc-test-profile');
+      const own = getSocketPath();
+      expect(own).not.toBe(shared);
+      made = path.dirname(own);
+      expect(own.endsWith('/ipc.sock')).toBe(true);
+      expect(Buffer.byteLength(own)).toBeLessThan(104);
+      // An explicit socket still wins.
+      process.env.AWRIT_IPC_SOCKET = '/custom/path.sock';
+      expect(getSocketPath()).toBe('/custom/path.sock');
+    } finally {
+      for (const key of ['AWRIT_IPC_SOCKET', 'AWRIT_USER_DATA_DIR']) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+      if (made && fs.existsSync(made)) fs.rmdirSync(made);
+    }
+  });
+
   test('broadcast sends newline-delimited JSON to connected clients', async () => {
     const testSock = path.join(tmpdir(), `test-awrit-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`);
     const server = await startIpcServer({ socketPath: testSock });
