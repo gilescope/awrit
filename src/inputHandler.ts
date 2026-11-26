@@ -1,3 +1,4 @@
+import { newSwipe, swipeSettings, swipeStep, swipeVertical } from './swipe';
 import { mouseTarget } from './topBar';
 import type { TermEvent } from 'awrit-native-rs';
 import { options } from './args';
@@ -11,7 +12,6 @@ import { noteUserInput } from './browserOwner/tools/userActivity';
 const WHEEL_DELTA = 100;
 // SGR wheel reports are discrete ticks, even when they originate from a touchpad.
 const ADB_WHEEL_DELTA = 24;
-const NAVIGATION_THRESHOLD = 3;
 const NAVIGATION_COOLDOWN = 500;
 
 export function createInputHandler(
@@ -24,9 +24,9 @@ export function createInputHandler(
   const handleKeyBinding = keyBindings.handleEvent;
   // The phone page reads the leader from settings on each load; read it per key so a change in setup applies without a restart.
   const isAndroidLeaderKey = (keyEvent: NonNullable<TermEvent['keyEvent']>) => startsBinding(keyEvent, readLeaderKey());
-  let horizontalScrollAccumulator = 0;
+  const swipe = newSwipe();
+  const swipeConfig = swipeSettings();
   let lastNavigationTime = 0;
-  let lastScrollTime = 0;
 
   let lastSentX = -1;
   let lastSentY = -1;
@@ -429,6 +429,7 @@ export function createInputHandler(
         }
 
         if (kind === 'scrollUp' || kind === 'scrollDown') {
+          swipeVertical(swipe);
           targetContents.sendInputEvent({
             type: 'mouseWheel',
             wheelTicksY: kind === 'scrollUp' ? 1 : -1,
@@ -452,29 +453,15 @@ export function createInputHandler(
           // as with deltaY above: a wheel-left must scroll content right.
           const wheelDirection = -direction;
 
-          if (
-            !view.adbMode &&
-            (Math.sign(horizontalScrollAccumulator) !== direction || now - lastScrollTime > 1000)
-          ) {
-            horizontalScrollAccumulator = 0;
-          }
+          const swiped = !view.adbMode && swipeStep(swipe, direction, now, swipeConfig);
 
-          if (!view.adbMode) horizontalScrollAccumulator += direction;
-          lastScrollTime = now;
-
-          if (
-            !view.adbMode &&
-            !isToolbarActive &&
-            Math.abs(horizontalScrollAccumulator) >= NAVIGATION_THRESHOLD &&
-            now - lastNavigationTime > NAVIGATION_COOLDOWN
-          ) {
+          if (swiped && !isToolbarActive && now - lastNavigationTime > NAVIGATION_COOLDOWN) {
             if (direction === -1) {
               view.back();
             } else {
               view.forward();
             }
             lastNavigationTime = now;
-            horizontalScrollAccumulator = 0;
           }
 
           targetContents.sendInputEvent({
