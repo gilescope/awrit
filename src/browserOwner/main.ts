@@ -53,6 +53,9 @@ if (ownerOptions.debugPort !== 'disabled')
   app.commandLine.appendSwitch('remote-debugging-port', ownerOptions.debugPort);
 // The supervisor lock owns remote-owner uniqueness; the local socket lock would
 // block a remote owner on a host that also runs a local viewer.
+// macOS Dock: the owner draws into terminals and has no window of its own, so an
+// icon in the Dock and the app switcher is a second app the user never opened.
+if (process.platform === 'darwin') app.dock?.hide();
 // Before the lock: Electron keeps the single-instance lock in the profile directory.
 const userData = ownerUserDataDir();
 if (userData) {
