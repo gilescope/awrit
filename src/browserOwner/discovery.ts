@@ -4,8 +4,26 @@ import os from 'node:os';
 import path from 'node:path';
 import { getAppDataPath } from '../paths';
 
+/**
+ * AWRIT_USER_DATA_DIR gives an owner its own Chromium profile directory, and with it
+ * its own single-instance lock and socket: a second build can then run beside the
+ * first instead of being refused by it. Absolute only, so clients started in different
+ * directories agree on the owner.
+ */
+export function ownerUserDataDir(env: Record<string, string | undefined> = process.env): string | undefined {
+  const dir = env.AWRIT_USER_DATA_DIR;
+  if (!dir) return undefined;
+  if (!path.isAbsolute(dir)) {
+    throw new Error(`AWRIT_USER_DATA_DIR must be an absolute path, found ${JSON.stringify(dir)}`);
+  }
+  return path.resolve(dir);
+}
+
 export function ownerSocketPath(): string {
-  const identity = createHash('sha256').update(getAppDataPath()).digest('hex').slice(0, 20);
+  const userData = ownerUserDataDir();
+  // Unset, the key is unchanged, so a running owner stays reachable across an upgrade.
+  const key = userData ? `${getAppDataPath()}\0${userData}` : getAppDataPath();
+  const identity = createHash('sha256').update(key).digest('hex').slice(0, 20);
   const name = `awrit-owner-${process.getuid?.() ?? os.userInfo().username}-${identity}`;
   let directory = path.join(process.env.XDG_RUNTIME_DIR || os.tmpdir(), name);
   // Darwin's sun_path has 104 bytes including its terminator; TMPDIR can be long.

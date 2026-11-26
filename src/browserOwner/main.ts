@@ -20,7 +20,7 @@ import { randomUUID } from 'node:crypto';
 import { app, Menu, nativeTheme } from 'electron';
 import { FrameDecoder } from './protocol';
 import { TerminalWriter } from './transport';
-import { ownerSocketPath } from './discovery';
+import { ownerSocketPath, ownerUserDataDir } from './discovery';
 import { PaneRegistry } from './panes';
 import { createTerminalContext } from '../terminal/context';
 import { createInputHandler } from '../inputHandler';
@@ -53,6 +53,12 @@ if (ownerOptions.debugPort !== 'disabled')
   app.commandLine.appendSwitch('remote-debugging-port', ownerOptions.debugPort);
 // The supervisor lock owns remote-owner uniqueness; the local socket lock would
 // block a remote owner on a host that also runs a local viewer.
+// Before the lock: Electron keeps the single-instance lock in the profile directory.
+const userData = ownerUserDataDir();
+if (userData) {
+  fs.mkdirSync(userData, { recursive: true, mode: 0o700 });
+  app.setPath('userData', userData);
+}
 const locked = remoteOwner || app.requestSingleInstanceLock();
 if (!locked) app.exit(1);
 Menu.setApplicationMenu(null);

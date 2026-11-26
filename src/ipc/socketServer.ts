@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
+import { ownerSocketPath, ownerUserDataDir } from '../browserOwner/discovery';
 import { console_ } from '../console';
 import {
   FeedbackDeliveryTracker,
@@ -38,6 +39,11 @@ export interface IpcServer {
 export function getSocketPath(): string {
   if (process.env.AWRIT_IPC_SOCKET) {
     return process.env.AWRIT_IPC_SOCKET;
+  }
+  // An owner with its own profile directory is a separate Awrit: its tools must not
+  // reach, or be refused by, the shared owner's socket.
+  if (ownerUserDataDir()) {
+    return path.join(path.dirname(ownerSocketPath()), 'ipc.sock');
   }
   if (process.env.XDG_RUNTIME_DIR) {
     return path.join(process.env.XDG_RUNTIME_DIR, 'awrit', 'ipc.sock');
