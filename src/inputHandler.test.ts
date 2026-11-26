@@ -312,11 +312,52 @@ describe('handleInput', () => {
     });
   });
 
-  test('a pixel wheel report of no vertical distance scrolls nothing', () => {
+  test('a pixel wheel report scrolls sideways by exactly its distance too', () => {
     const { view, contentWebContents } = createView();
     focusedView.current = view;
     handleInput(pixelWheel('40;20;3.00;0.00;0;0'));
+    expect(contentWebContents.events).toHaveLength(1);
+    expect(contentWebContents.events[0]).toMatchObject({ deltaX: 3, deltaY: 0, hasPreciseScrollingDeltas: true });
+  });
+
+  // An eased notch in the middle of a run of distances stalls the page for its whole
+  // animation: Chromium plays the two against each other.
+  test('a sideways notch in a pixel wheel report sends the page nothing eased', () => {
+    const { view, contentWebContents } = createView();
+    focusedView.current = view;
+    handleInput(pixelWheel('40;20;15.00;-30.00;1;0'));
+    expect(contentWebContents.events).toHaveLength(1);
+    expect(contentWebContents.events[0]).toMatchObject({ deltaX: 15, deltaY: -30, hasPreciseScrollingDeltas: true });
+  });
+
+  test('a sideways swipe that drifts a little vertically still swipes back', () => {
+    const { view } = createView();
+    view.back = mock(() => {});
+    const handler = createInputHandler(() => view, () => [view]);
+    for (let i = 0; i < 3; i++) handler.handleInput(pixelWheel('40;20;15.00;-2.00;1;0'));
+    expect(view.back).toHaveBeenCalledTimes(1);
+    handler.dispose();
+  });
+
+  test('sideways notches leaking from a vertical scroll do not swipe', () => {
+    const { view } = createView();
+    view.back = mock(() => {});
+    const handler = createInputHandler(() => view, () => [view]);
+    for (let i = 0; i < 3; i++) handler.handleInput(pixelWheel('40;20;15.00;-40.00;1;0'));
+    expect(view.back).toHaveBeenCalledTimes(0);
+    handler.dispose();
+  });
+
+  test('a phone takes the notches of a pixel wheel report, not its distance', () => {
+    const { view, contentWebContents } = createView();
+    view.adbMode = true;
+    focusedView.current = view;
+    handleInput(pixelWheel('40;20;0.00;-12.50;0;0'));
     expect(contentWebContents.events).toHaveLength(0);
+    handleInput(pixelWheel('40;20;0.00;-12.50;0;-1'));
+    expect(contentWebContents.events).toHaveLength(1);
+    expect(contentWebContents.events[0]).toMatchObject({ hasPreciseScrollingDeltas: false });
+    expect(Math.sign(contentWebContents.events[0].deltaY)).toBe(-1);
   });
 
   test('sideways notches in pixel wheel reports still swipe back', () => {
